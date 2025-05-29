@@ -13,7 +13,9 @@
     xmlns:mini="clr-namespace:NINA.View.Sequencer.MiniSequencer;assembly=NINA.Sequencer"
     xmlns:converters="clr-namespace:NINA.Core.Utility.Converters;assembly=NINA.Core"
     xmlns:ninactrl="clr-namespace:NINA.CustomControlLibrary;assembly=NINA.CustomControlLibrary"
-    xmlns:nina="clr-namespace:NINA.View.Sequencer;assembly=NINA.Sequencer">
+    xmlns:nina="clr-namespace:NINA.View.Sequencer;assembly=NINA.Sequencer"
+    xmlns:ns="clr-namespace:NINA.Core.Locale;assembly=NINA.Core"
+    xmlns:rules="clr-namespace:NINA.Core.Utility.ValidationRules;assembly=NINA.Core">
 
     <GeometryGroup x:Key="DecArc_SVG">
         <PathGeometry Figures="M 72.1667,420L 1.52588e-005,420L 1.52588e-005,310.458L 72.1667,310.458L 72.1667,323.396L 14.5625,323.396L 14.5625,353.417L 72.1667,353.417L 72.1667,366.375L 14.5625,366.375L 14.5625,407.042L 72.1667,407.042L 72.1667,420 Z " />
@@ -47,25 +49,60 @@
 
                     <TextBlock VerticalAlignment="Center" Margin="10,0,0,0" Text="|" />
 
-                    <TextBlock Margin="10,0,0,0" VerticalAlignment="Center">
-                        <TextBlock.Text>HA tail</TextBlock.Text>
-                        <TextBlock.ToolTip>
-                            <TextBlock>
-                            By default, the modeled arc will end where the target will be at sunrise. You may extend the arc westward by increasing this west hour angle value. Useful if you plan to image the target over many consecutive nights using the same dec-arc model.
-                            <LineBreak />
-                            Targets shift westward in the sky by approximately 4 minutes each day.
+                    <StackPanel Orientation="Horizontal">
+
+                        <TextBlock Margin="5,0,0,0" VerticalAlignment="Center" Text="{ns:Loc LblSource}" />
+
+                        <ComboBox
+                            IsEnabled="{Binding DoFullArc, Converter={StaticResource InverseBooleanConverter}}"
+                            Margin="5,0,0,0"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center"
+                            DisplayMemberPath="Name"
+                            ItemsSource="{Binding DateTimeProviders}"
+                            SelectedItem="{Binding SelectedProvider}" />
+
+                        <TextBlock Margin="5,0,0,0" VerticalAlignment="Center">
+                            <TextBlock.Text>HA end</TextBlock.Text>
+                            <TextBlock.ToolTip>
+                                <TextBlock>
+                                    By default, the modeled arc will end where the target will be at sunrise. You may extend the arc westward by increasing the west hour angle tail value. Useful if you plan to image the target over many consecutive nights using the same dec-arc model.
+                                    <LineBreak />
+                                    Targets shift westward in the sky by approximately 4 minutes each day.
+                                </TextBlock>
+                            </TextBlock.ToolTip>
+                        </TextBlock>
+                        <ninactrl:PrecisionStepperControl
+                            IsEnabled="{Binding AllowHourAngleEndEdit}"
+                            Margin="5,0,0,0"
+                            MaxValue="12"
+                            MinValue="-12"
+                            StepSize="0.1"
+                            Precision="2"
+                            Value="{Binding HourAngleEnd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" >
+                            <ninactrl:PrecisionStepperControl.InnerContent>
+                                <ninactrl:UnitTextBox
+                                    VerticalContentAlignment="Center"
+                                    Text="{Binding HourAngleEnd, StringFormat=\{0:0.00\}}"
+                                    TextAlignment="Center"
+                                    Unit="hours" />
+                                </ninactrl:PrecisionStepperControl.InnerContent>
+                            </ninactrl:PrecisionStepperControl>
+                            <StackPanel Orientation="Horizontal" Visibility="{Binding HasFixedTimeProvider, Converter={StaticResource VisibilityConverter}}">
+                            <TextBlock Margin="5,0,0,0" VerticalAlignment="Center">
+                                <TextBlock.Text>Tail</TextBlock.Text>
                             </TextBlock>
-                        </TextBlock.ToolTip>
-                    </TextBlock>
-                    <ninactrl:PrecisionStepperControl
-                        IsEnabled="{Binding DoFullArc, Converter={StaticResource InverseBooleanConverter}}"
-                        Margin="5,0,0,0"
-                        MaxValue="12"
-                        MinValue="0"
-                        StepSize="0.1"
-                        Precision="2"
-                        Unit="hours"
-                        Value="{Binding HourAngleTail, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged, StringFormat={}{0:0.F2}}" />
+                            <ninactrl:PrecisionStepperControl
+                                IsEnabled="{Binding DoFullArc, Converter={StaticResource InverseBooleanConverter}}"
+                                Margin="5,0,0,0"
+                                MaxValue="12"
+                                MinValue="0"
+                                StepSize="0.1"
+                                Precision="2"
+                                Unit="hours"
+                                Value="{Binding HourAngleTail, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged, StringFormat={}{0:0.F2}}" />
+                        </StackPanel>
+                    </StackPanel>
 
                     <TextBlock VerticalAlignment="Center" Margin="10,0,0,0" Text="|" />
 

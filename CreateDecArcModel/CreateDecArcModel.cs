@@ -14,6 +14,7 @@ using DaleGhent.NINA.AstroPhysicsTools.Interfaces;
 using Newtonsoft.Json;
 using NINA.Astrometry;
 using NINA.Astrometry.Interfaces;
+using NINA.Core.Locale;
 using NINA.Core.Model;
 using NINA.Core.Model.Equipment;
 using NINA.Core.Utility;
@@ -21,6 +22,7 @@ using NINA.Core.Utility.Notification;
 using NINA.Equipment.Interfaces.Mediator;
 using NINA.Profile.Interfaces;
 using NINA.Sequencer.SequenceItem;
+using NINA.Sequencer.Utility.DateTimeProvider;
 using NINA.Sequencer.Validations;
 using System;
 using System.Collections.Generic;
@@ -29,8 +31,10 @@ using System.ComponentModel;
 using System.ComponentModel.Composition;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using TimeProvider = NINA.Sequencer.Utility.DateTimeProvider.TimeProvider;
 
 namespace DaleGhent.NINA.AstroPhysicsTools.CreateDecArcModel {
 
@@ -42,6 +46,8 @@ namespace DaleGhent.NINA.AstroPhysicsTools.CreateDecArcModel {
     [JsonObject(MemberSerialization.OptIn)]
     public class CreateDecArcModel : SequenceItem, IValidatable, INotifyPropertyChanged {
         private double hourAngleLeadIn;
+        private double hourAngleEnd;
+        private DateTime timeEnd;
         private double hourAngleTail;
         private bool manualMode = false;
         private bool doNotExit = false;
@@ -49,18 +55,22 @@ namespace DaleGhent.NINA.AstroPhysicsTools.CreateDecArcModel {
         private int totalPoints = 0;
         private int currentPoint = 0;
         private string mappingRunState = "Unknown";
+        private bool timeDeterminedSuccessfully;
+        private DateTime lastReferenceDate;
         private AppmApi.AppmApi appm = null;
         private readonly IProfileService profileService;
         private readonly ICameraMediator cameraMediator;
         private readonly IFilterWheelMediator filterWheelMediator;
         private readonly IGuiderMediator guiderMediator;
+        private IList<IDateTimeProvider> dateTimeProviders;
+        private IDateTimeProvider selectedProvider;
         private readonly IAstroPhysicsToolsOptions options;
 
         [ImportingConstructor]
-        public CreateDecArcModel(IProfileService profileService, ICameraMediator cameraMediator, IFilterWheelMediator filterWheelMediator, IGuiderMediator guiderMediator) : this(profileService, cameraMediator, filterWheelMediator, guiderMediator, AstroPhysicsTools.AstroPhysicsToolsOptions) {
+        public CreateDecArcModel(IProfileService profileService, ICameraMediator cameraMediator, IFilterWheelMediator filterWheelMediator, IGuiderMediator guiderMediator, IList<IDateTimeProvider> dateTimeProviders) : this(profileService, cameraMediator, filterWheelMediator, guiderMediator, dateTimeProviders, "Sunrise", AstroPhysicsTools.AstroPhysicsToolsOptions) {
         }
 
-        public CreateDecArcModel(IProfileService profileService, ICameraMediator cameraMediator, IFilterWheelMediator filterWheelMediator, IGuiderMediator guiderMediator, IAstroPhysicsToolsOptions options) {
+        public CreateDecArcModel(IProfileService profileService, ICameraMediator cameraMediator, IFilterWheelMediator filterWheelMediator, IGuiderMediator guiderMediator, IList<IDateTimeProvider> dateTimeProviders, string dateTimeProviderName, IAstroPhysicsToolsOptions options) {
             this.profileService = profileService;
             this.cameraMediator = cameraMediator;
             this.filterWheelMediator = filterWheelMediator;
@@ -73,17 +83,58 @@ namespace DaleGhent.NINA.AstroPhysicsTools.CreateDecArcModel {
 
             hourAngleLeadIn = options.DecArcHourAngleLeadIn;
             hourAngleTail = options.DecArcHourAngleTail;
+
+            DateTime = new SystemDateTime();
+            this.DateTimeProviders = dateTimeProviders;
+            this.SelectedProvider = DateTimeProviders?.FirstOrDefault(x => x.Name.Equals(dateTimeProviderName, StringComparison.CurrentCultureIgnoreCase));
         }
 
-        public CreateDecArcModel(CreateDecArcModel copyMe) : this(copyMe.profileService, copyMe.cameraMediator, copyMe.filterWheelMediator, copyMe.guiderMediator, copyMe.options) {
+        public CreateDecArcModel(CreateDecArcModel copyMe) : this(copyMe.profileService, copyMe.cameraMediator, copyMe.filterWheelMediator, copyMe.guiderMediator, copyMe.dateTimeProviders, copyMe.SelectedProvider.Name, copyMe.options) {
             CopyMetaData(copyMe);
         }
+
+        public IList<IDateTimeProvider> DateTimeProviders {
+            get => dateTimeProviders;
+            set {
+                dateTimeProviders = value;
+                RaisePropertyChanged();
+            }
+        }
+
+        [JsonProperty]
+        public IDateTimeProvider SelectedProvider {
+            get => selectedProvider;
+            set {
+                selectedProvider = value;
+                if (selectedProvider != null) {
+                    UpdateTime();
+                    RaisePropertyChanged();
+                    RaisePropertyChanged(nameof(HasFixedTimeProvider));
+                    RaisePropertyChanged(nameof(AllowHourAngleEndEdit));
+                }
+            }
+        }
+
+        public bool HasFixedTimeProvider => selectedProvider != null && selectedProvider is not TimeProvider;
+
+        public bool AllowHourAngleEndEdit => !HasFixedTimeProvider && !DoFullArc;
+
+        public ICustomDateTime DateTime { get; set; }
 
         [JsonProperty]
         public double HourAngleLeadIn {
             get => hourAngleLeadIn;
             set {
                 hourAngleLeadIn = value;
+                RaisePropertyChanged();
+            }
+        }
+
+        [JsonProperty]
+        public double HourAngleEnd {
+            get => hourAngleEnd;
+            set {
+                hourAngleEnd = value;
                 RaisePropertyChanged();
             }
         }
@@ -103,6 +154,7 @@ namespace DaleGhent.NINA.AstroPhysicsTools.CreateDecArcModel {
             set {
                 doFullArc = value;
                 RaisePropertyChanged();
+                RaisePropertyChanged(nameof(AllowHourAngleEndEdit));
             }
         }
 
@@ -151,6 +203,12 @@ namespace DaleGhent.NINA.AstroPhysicsTools.CreateDecArcModel {
             }
         }
 
+        private IDeepSkyObject GetDsoInfo() {
+            var target = Utility.Utility.FindDsoInfo(this.Parent) ?? throw new SequenceEntityFailedException("No DSO has been defined");
+            target.Coordinates = target.Coordinates.Transform(Epoch.JNOW);
+            return target;
+        }
+
         public override async Task Execute(IProgress<ApplicationStatus> progress, CancellationToken ct) {
             var updateStatusTaskCts = new CancellationTokenSource();
             CancellationToken updateStatusTaskCt = updateStatusTaskCts.Token;
@@ -159,8 +217,7 @@ namespace DaleGhent.NINA.AstroPhysicsTools.CreateDecArcModel {
             bool stoppedGuiding = false;
             appm = new AppmApi.AppmApi();
 
-            var target = Utility.Utility.FindDsoInfo(this.Parent) ?? throw new SequenceEntityFailedException("No DSO has been defined");
-            target.Coordinates = target.Coordinates.Transform(Epoch.JNOW);
+            var target = GetDsoInfo();
 
             if (target.Coordinates.Dec > 85d || target.Coordinates.Dec < -85d) {
                 string message = $"The target's declination of {target.Coordinates.DecString} is too close to the pole to create a meaningful model. Skipping model creation.";
@@ -342,6 +399,17 @@ namespace DaleGhent.NINA.AstroPhysicsTools.CreateDecArcModel {
                 i.Add("Invalid location for APPM settings file");
             }
 
+            if (HasFixedTimeProvider) {
+                var referenceDate = NighttimeCalculator.GetReferenceDate(DateTime.Now);
+                if (lastReferenceDate != referenceDate) {
+                    UpdateTime();
+                }
+            }
+
+            if (!timeDeterminedSuccessfully) {
+                i.Add(Loc.Instance["LblSelectedTimeSourceInvalid"]);
+            }
+
             if (i != Issues) {
                 Issues = i;
                 RaisePropertyChanged(nameof(Issues));
@@ -381,17 +449,17 @@ namespace DaleGhent.NINA.AstroPhysicsTools.CreateDecArcModel {
             var longitude = profileService.ActiveProfile.AstrometrySettings.Longitude;
 
             var timeNow = DateTime.UtcNow;
-            var sunRiseTime = AstroUtil.GetSunRiseAndSet(timeNow, latitude, longitude).Rise.Value;
+            var timeAtEnd = timeEnd;
 
-            if (timeNow > sunRiseTime) {
-                sunRiseTime = AstroUtil.GetSunRiseAndSet(timeNow.AddDays(1), latitude, longitude).Rise.Value;
+            if (timeNow > timeEnd) {
+                timeAtEnd = timeAtEnd.AddDays(1);
             }
 
             var targetHaNow = HourAngle24to12(AstroUtil.GetHourAngle(AstroUtil.GetLocalSiderealTimeNow(longitude), target.Coordinates.RA));
-            var targetHaAtSunrise = targetHaNow + (sunRiseTime - timeNow).TotalHours;
+            var targetHaAtEnd = HourAngleEnd;
 
             var decArcStart = targetHaNow - hourAngleLeadIn;
-            var decArcEnd = targetHaAtSunrise + hourAngleTail;
+            var decArcEnd = targetHaAtEnd + (HasFixedTimeProvider ? hourAngleTail : 0);
 
             decArcStart = Math.Max(decArcStart, -12d);
             decArcStart = Math.Min(decArcStart, 12d);
@@ -422,7 +490,7 @@ namespace DaleGhent.NINA.AstroPhysicsTools.CreateDecArcModel {
                 decArcParams.DecOffset = decArcParams.SouthDecLimit % decArcParams.DecSpacing;
             }
 
-            Logger.Info($"Target RA: {target.Coordinates.RAString}, Target Current HA: {targetHaNow:0.00}, Target HA at sunrise: {targetHaAtSunrise:0.00}, Sunrise Time: {sunRiseTime}");
+            Logger.Info($"Target RA: {target.Coordinates.RAString}, Target Current HA: {targetHaNow:0.00}, Target HA at end: {targetHaAtEnd:0.00}, Time at end: {timeAtEnd}");
             Logger.Info($"DecArc HA start: {decArcStart:0.00}, DecArc HA end: {decArcEnd:0.00}, Total DecArc length: {(decArcEnd - decArcStart):0.00} hours");
 
             return decArcParams;
@@ -460,6 +528,26 @@ namespace DaleGhent.NINA.AstroPhysicsTools.CreateDecArcModel {
                     throw;
                 }
             }
+        }
+
+        private void UpdateTime() {
+            try {
+                lastReferenceDate = NighttimeCalculator.GetReferenceDate(DateTime.Now);
+                var target = GetDsoInfo();
+                var longitude = profileService.ActiveProfile.AstrometrySettings.Longitude;
+                if (HasFixedTimeProvider) {
+                    var t = SelectedProvider.GetDateTime(this);
+                    HourAngleEnd = HourAngle24to12(AstroUtil.GetHourAngle(AstroUtil.GetLocalSiderealTime(t, longitude), target.Coordinates.RA));
+                }
+                timeDeterminedSuccessfully = true;
+            } catch (Exception) {
+                timeDeterminedSuccessfully = false;
+                Validate();
+            }
+        }
+
+        public override void AfterParentChanged() {
+            UpdateTime();
         }
 
         private Version AppmFileVersion { get; set; }
